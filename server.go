@@ -1,11 +1,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"log"
 	"math"
 	"net/http"
+	"regexp"
+	"strconv"
 	"sync"
 )
 
@@ -57,7 +60,7 @@ func (myServer *MyServer) launchApplication() {
 func (myServer *MyServer) setupRouter() {
 	router := gin.Default()
 	router.GET("/", myServer.handleHealthCheck)
-	router.GET("/:ipAddr", myServer.handleQuery)
+	router.GET("/:domain", myServer.handleQuery)
 	myServer.HttpServer.Handler = router
 }
 
@@ -66,26 +69,80 @@ func (myServer *MyServer) handleHealthCheck(c *gin.Context) {
 }
 
 func (myServer *MyServer) handleQuery(c *gin.Context) {
-	ipAddress := c.Param("ipAddr")
+	if err := validateQuery(c); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"message": fmt.Sprintf("failure: %v", err),
+		})
+		return
+	}
+
+	domain := c.Param("domain")
+	fromPort := getFromPort(c)
+	toPort := getToPort(c)
+
 	var tasks []Task
-	for startPort := 0; startPort < 65536; startPort += myServer.portChunkSize {
+	for startPort := fromPort; startPort < toPort; startPort += myServer.portChunkSize {
 		newTask := *NewTask(
-			ipAddress,
+			domain,
 			startPort,
-			int(math.Min(float64(startPort+myServer.portChunkSize), 65536)),
+			int(math.Min(float64(startPort+myServer.portChunkSize), float64(toPort))),
 		)
 		tasks = append(tasks, newTask)
 		myServer.TaskQueue <- newTask
 	}
+
 	var ports []int
 	for _, task := range tasks {
-		for result := range task.Results {
-			ports = append(ports, result.Ports...)
+		for openPort := range task.OpenPorts {
+			ports = append(ports, openPort)
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"message":   "success",
-		"ipAddress": ipAddress,
-		"ports":     ports,
+		"message": "success",
+		"domain":  domain,
+		"ports":   ports,
 	})
+}
+
+func validateQuery(c *gin.Context) []error {
+	var errorList []error
+	domain := c.Param("domain")
+	fromPortStr := c.Query("from")
+	toPortStr := c.Query("to")
+
+	ipRegex := regexp.MustCompile(`^(\d{1,3}\.){3}\d{1,3}$`)
+	domainRegex := regexp.MustCompile(`^([a-zA-Z0-9]+\.)*[a-zA-Z0-9]+\.[a-zA-Z]{2,}$`)
+	if !ipRegex.MatchString(domain) && !domainRegex.MatchString(domain) {
+		errorList = append(errorList, errors.New("invalid domain"))
+	}
+
+	_, err := strconv.Atoi(fromPortStr)
+	if fromPortStr != "" && err != nil {
+		errorList = append(errorList, errors.New("bad 'from' parameter"))
+	}
+
+	_, err = strconv.Atoi(toPortStr)
+	if fromPortStr != "" && err != nil {
+		errorList = append(errorList, errors.New("bad 'to' parameter"))
+	}
+
+	return errorList
+}
+
+func getFromPort(c *gin.Context) int {
+	fromPortStr := c.Query("from")
+	if fromPortStr == "" {
+		return MinPortNum
+	}
+	fromPort, _ := strconv.Atoi(fromPortStr)
+	return fromPort
+}
+
+func getToPort(c *gin.Context) int {
+	toPortStr := c.Query("to")
+	if toPortStr == "" {
+		return MaxPortNum
+	}
+	toPort, _ := strconv.Atoi(toPortStr)
+	return toPort
 }
