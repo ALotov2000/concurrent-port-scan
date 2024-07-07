@@ -1,7 +1,7 @@
 package main
 
 func main() {
-	myServer := NewServer(5555, 101, 32)
+	myServer, _ := NewServer() // todo: error handling
 	forever := make(chan struct{})
 	myServer.Launch()
 	<-forever

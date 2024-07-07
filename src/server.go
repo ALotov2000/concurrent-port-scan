@@ -13,27 +13,39 @@ import (
 )
 
 type MyServer struct {
-	HttpServer    http.Server
-	TaskQueue     chan Task
-	numWorker     int
-	numChunk      int
-	portChunkSize int
+	HttpServer http.Server
+	TaskQueue  chan Task
+	Config     *Config
 }
 
-func NewServer(port uint16, numWorker int, portChunkSize int) *MyServer {
-	taskQueue := make(chan Task, 2*numWorker)
+type Config struct {
+	Port          uint16
+	NumWorker     int
+	PortChunkSize int
+}
+
+func NewServer() (*MyServer, error) {
+	configObj, _ := getConfigObj() // todo: error handling
+	taskQueue := make(chan Task, 2*configObj.NumWorker)
 	myNewServer := &MyServer{
 		HttpServer: http.Server{
-			Addr: fmt.Sprintf(":%d", port),
+			Addr: fmt.Sprintf(":%d", configObj.Port),
 		},
-		TaskQueue:     taskQueue,
-		numWorker:     numWorker,
-		portChunkSize: portChunkSize,
+		TaskQueue: taskQueue,
+		Config:    configObj,
 	}
 
 	myNewServer.setupRouter()
 
-	return myNewServer
+	return myNewServer, nil
+}
+
+func getConfigObj() (*Config, error) { // todo: must be read from a yml file
+	return &Config{
+		Port:          5555,
+		NumWorker:     100,
+		PortChunkSize: 32,
+	}, nil
 }
 
 func (myServer *MyServer) Launch() {
@@ -43,7 +55,7 @@ func (myServer *MyServer) Launch() {
 
 func (myServer *MyServer) launchHttp() {
 	log.Printf("launching server on: %s\n", myServer.HttpServer.Addr)
-	if err := myServer.HttpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := myServer.HttpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("Application could not be created")
 	}
 }
@@ -51,7 +63,7 @@ func (myServer *MyServer) launchHttp() {
 func (myServer *MyServer) launchApplication() {
 	log.Printf("launching port scan application: %s\n", myServer.HttpServer.Addr)
 	wg := &sync.WaitGroup{}
-	for i := 1; i <= myServer.numWorker; i++ {
+	for i := 1; i <= myServer.Config.NumWorker; i++ {
 		go worker(i, myServer.TaskQueue, wg)
 	}
 	wg.Wait()
@@ -81,11 +93,11 @@ func (myServer *MyServer) handleQuery(c *gin.Context) {
 	toPort := getToPort(c)
 
 	var tasks []Task
-	for startPort := fromPort; startPort < toPort; startPort += myServer.portChunkSize {
+	for startPort := fromPort; startPort < toPort; startPort += myServer.Config.PortChunkSize {
 		newTask := *NewTask(
 			domain,
 			startPort,
-			int(math.Min(float64(startPort+myServer.portChunkSize), float64(toPort))),
+			int(math.Min(float64(startPort+myServer.Config.PortChunkSize), float64(toPort))),
 		)
 		tasks = append(tasks, newTask)
 		myServer.TaskQueue <- newTask
