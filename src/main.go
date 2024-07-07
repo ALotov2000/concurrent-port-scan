@@ -1,8 +1,18 @@
 package main
 
+type Server interface {
+	Launch()
+}
+
+type Task interface {
+	ID() int
+	OpenPorts() chan uint16
+	Handle()
+}
+
 func main() {
-	myServer, _ := NewServer() // todo: error handling
+	server, _ := NewServer() // todo: error handling
 	forever := make(chan struct{})
-	myServer.Launch()
+	server.Launch()
 	<-forever
 }
