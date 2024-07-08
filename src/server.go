@@ -10,29 +10,33 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
+	"time"
 )
 
 type myServer struct {
-	HttpServer http.Server
-	TaskQueue  chan Task
-	Config     *Config
+	httpServer http.Server
+	config     *config
 }
 
-type Config struct {
-	Port          uint16
-	NumWorker     int
-	PortChunkSize int
+type config struct {
+	port          uint
+	portChunkSize uint
+	clusters      []cluster
+}
+
+type cluster struct {
+	mean      uint
+	numWorker uint
+	taskQueue chan Task
 }
 
 func NewServer() (Server, error) {
 	configObj, _ := getConfigObj() // todo: error handling
-	taskQueue := make(chan Task, 2*configObj.NumWorker)
 	myNewServer := &myServer{
-		HttpServer: http.Server{
-			Addr: fmt.Sprintf(":%d", configObj.Port),
+		httpServer: http.Server{
+			Addr: fmt.Sprintf(":%d", configObj.port),
 		},
-		TaskQueue: taskQueue,
-		Config:    configObj,
+		config: configObj,
 	}
 
 	myNewServer.setupRouter()
@@ -40,11 +44,15 @@ func NewServer() (Server, error) {
 	return myNewServer, nil
 }
 
-func getConfigObj() (*Config, error) { // todo: must be read from a yml file
-	return &Config{
-		Port:          5555,
-		NumWorker:     100,
-		PortChunkSize: 32,
+func getConfigObj() (*config, error) { // todo: must be read from a yml file
+	return &config{
+		port:          5555,
+		portChunkSize: 32,
+		clusters: []cluster{
+			{mean: 1000, numWorker: 70, taskQueue: make(chan Task)},
+			{mean: 10000, numWorker: 20, taskQueue: make(chan Task)},
+			{mean: 40000, numWorker: 10, taskQueue: make(chan Task)},
+		},
 	}, nil
 }
 
@@ -54,17 +62,21 @@ func (myServer *myServer) Launch() {
 }
 
 func (myServer *myServer) launchHttp() {
-	log.Printf("launching server on: %s\n", myServer.HttpServer.Addr)
-	if err := myServer.HttpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	log.Printf("launching server on: %s\n", myServer.httpServer.Addr)
+	if err := myServer.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("Application could not be created")
 	}
 }
 
 func (myServer *myServer) launchApplication() {
-	log.Printf("launching port scan application: %s\n", myServer.HttpServer.Addr)
-	wg := &sync.WaitGroup{}
-	for i := 1; i <= myServer.Config.NumWorker; i++ {
-		go worker(i, myServer.TaskQueue, wg)
+	log.Printf("launching port scan application: %s\n", myServer.httpServer.Addr)
+	var wg sync.WaitGroup
+	var id uint = 1
+	for _, c := range myServer.config.clusters {
+		for i := 1; i <= int(c.numWorker); i++ {
+			go worker(id, c.taskQueue, &wg)
+			id += 1
+		}
 	}
 	wg.Wait()
 }
@@ -73,7 +85,7 @@ func (myServer *myServer) setupRouter() {
 	router := gin.Default()
 	router.GET("/", myServer.handleHealthCheck)
 	router.GET("/:domain", myServer.handleQuery)
-	myServer.HttpServer.Handler = router
+	myServer.httpServer.Handler = router
 }
 
 func (myServer *myServer) handleHealthCheck(c *gin.Context) {
@@ -87,33 +99,54 @@ func (myServer *myServer) handleQuery(c *gin.Context) {
 		})
 		return
 	}
-
-	domain := c.Param("domain")
-	fromPort := getFromPort(c)
-	toPort := getToPort(c)
-
-	var tasks []Task
-	for startPort := fromPort; startPort < toPort; startPort += myServer.Config.PortChunkSize {
+	domain, fromPort, toPort := myServer.getParameters(c)
+	outputChannel := make(chan Output)
+	for startPort := fromPort; startPort <= toPort; startPort += myServer.config.portChunkSize {
 		newTask := NewTask(
 			domain,
 			startPort,
-			int(math.Min(float64(startPort+myServer.Config.PortChunkSize), float64(toPort))),
+			uint(math.Min(float64(startPort+myServer.config.portChunkSize), float64(toPort))),
+			outputChannel,
 		)
-		tasks = append(tasks, newTask)
-		myServer.TaskQueue <- newTask
+		c := myServer.findBestCluster(startPort)
+		c.taskQueue <- newTask
+	}
+	go func() {
+		<-time.After(2 * time.Second)
+		close(outputChannel)
+	}()
+	myServer.printOutputs(c, outputChannel)
+}
+
+func (myServer *myServer) getParameters(c *gin.Context) (string, uint, uint) {
+	domain := c.Param("domain")
+	fromPort := getFromPort(c)
+	toPort := getToPort(c)
+	return domain, fromPort, toPort
+}
+
+func (myServer *myServer) printOutputs(c *gin.Context, outputChannel chan Output) {
+	result := make([]Output, 0)
+	for o := range outputChannel {
+		result = append(result, o)
 	}
 
-	var ports []uint16
-	for _, task := range tasks {
-		for openPort := range task.OpenPorts() {
-			ports = append(ports, openPort)
+	c.JSON(http.StatusOK, gin.H{
+		"result": result,
+	})
+}
+
+func (myServer *myServer) findBestCluster(startPort uint) cluster {
+	bestD := math.Inf(1)
+	var bestC cluster
+	for _, c := range myServer.config.clusters {
+		d := math.Abs(float64(c.mean - startPort))
+		if d < bestD {
+			bestD = d
+			bestC = c
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"message": "success",
-		"domain":  domain,
-		"ports":   ports,
-	})
+	return bestC
 }
 
 func validateQuery(c *gin.Context) []error {
@@ -141,20 +174,20 @@ func validateQuery(c *gin.Context) []error {
 	return errorList
 }
 
-func getFromPort(c *gin.Context) int {
+func getFromPort(c *gin.Context) uint {
 	fromPortStr := c.Query("from")
 	if fromPortStr == "" {
 		return MinPortNum
 	}
 	fromPort, _ := strconv.Atoi(fromPortStr)
-	return fromPort
+	return uint(fromPort)
 }
 
-func getToPort(c *gin.Context) int {
+func getToPort(c *gin.Context) uint {
 	toPortStr := c.Query("to")
 	if toPortStr == "" {
 		return MaxPortNum
 	}
 	toPort, _ := strconv.Atoi(toPortStr)
-	return toPort
+	return uint(toPort)
 }

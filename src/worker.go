@@ -5,7 +5,7 @@ import (
 	"sync"
 )
 
-func worker(id int, tasks <-chan Task, wg *sync.WaitGroup) {
+func worker(id uint, tasks <-chan Task, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for task := range tasks {
 		log.Printf("Worker %d processing task %d\n", id, task.ID())

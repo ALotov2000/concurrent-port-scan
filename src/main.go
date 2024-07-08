@@ -6,8 +6,11 @@ type Server interface {
 
 type Task interface {
 	ID() int
-	OpenPorts() chan uint16
+	OutputChannel() chan Output
 	Handle()
+}
+
+type Output interface {
 }
 
 func main() {
