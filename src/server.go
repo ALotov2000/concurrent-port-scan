@@ -49,9 +49,9 @@ func getConfigObj() (*config, error) { // todo: must be read from a yml file
 		port:          5555,
 		portChunkSize: 32,
 		clusters: []cluster{
-			{mean: 1000, numWorker: 70, taskQueue: make(chan Task)},
-			{mean: 10000, numWorker: 30, taskQueue: make(chan Task)},
-			{mean: 40000, numWorker: 30, taskQueue: make(chan Task)},
+			{mean: 1000, numWorker: 50, taskQueue: make(chan Task)},
+			{mean: 10000, numWorker: 70, taskQueue: make(chan Task)},
+			{mean: 40000, numWorker: 70, taskQueue: make(chan Task)},
 		},
 	}, nil
 }

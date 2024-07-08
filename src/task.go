@@ -14,9 +14,8 @@ const MinPortNum uint = 0
 const MaxPortNum uint = 65535
 
 var timeouts = []time.Duration{
-	200 * time.Millisecond,
 	500 * time.Millisecond,
-	10 * time.Second,
+	5 * time.Second,
 }
 
 type myTask struct {
