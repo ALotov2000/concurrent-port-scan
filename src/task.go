@@ -12,8 +12,12 @@ var lastID = 0
 
 const MinPortNum uint = 0
 const MaxPortNum uint = 65535
-const Timeout = 5 * time.Second
-const NumRepeat = 2
+
+var timeouts = []time.Duration{
+	200 * time.Millisecond,
+	500 * time.Millisecond,
+	10 * time.Second,
+}
 
 type myTask struct {
 	id            int
@@ -21,9 +25,10 @@ type myTask struct {
 	startPort     uint
 	endPort       uint // inclusive
 	outputChannel chan Output
+	wg            *sync.WaitGroup
 }
 
-func NewTask(ipAddr string, startPort uint, endPort uint, outputChannel chan Output) Task {
+func NewTask(ipAddr string, startPort uint, endPort uint, outputChannel chan Output, wg *sync.WaitGroup) Task {
 	lastID += 1
 	log.Printf("myTask with id %d is created: Address=%s, ports=[%d, %d)", lastID, ipAddr, startPort, endPort)
 
@@ -33,29 +38,45 @@ func NewTask(ipAddr string, startPort uint, endPort uint, outputChannel chan Out
 		startPort:     startPort,
 		endPort:       endPort, // inclusive
 		outputChannel: outputChannel,
+		wg:            wg,
 	}
 }
 
 func (t *myTask) Handle() {
+	defer t.wg.Done()
 	log.Printf("Handling task %d. Address: %s, port Range: [%d, %d)", t.id, t.ipAddr, t.startPort, t.endPort)
 	var wg sync.WaitGroup
 	for port := t.startPort; port < t.endPort; port += 1 {
+		address := fmt.Sprintf("%s:%d", t.ipAddr, port)
 		wg.Add(1)
-		port := port
+		go tryPort(address, port, &wg, t.outputChannel)
+	}
+	wg.Wait()
+}
+
+func tryPort(address string, port uint, wg *sync.WaitGroup, outputChannel chan Output) {
+	defer wg.Done()
+	isFound := make(chan bool, 1)
+	var localWg sync.WaitGroup
+	for _, timeout := range timeouts {
+		localWg.Add(1)
 		go func() {
-			defer wg.Done()
-			address := fmt.Sprintf("%s:%d", t.ipAddr, port)
-			for range NumRepeat {
-				conn, err := net.DialTimeout("tcp", address, Timeout)
-				if err == nil {
-					_ = conn.Close()
-					t.outputChannel <- port
-					return
-				}
+			defer localWg.Done()
+			conn, err := net.DialTimeout("tcp", address, timeout)
+			if err == nil {
+				_ = conn.Close()
+				isFound <- true
+				return
 			}
 		}()
 	}
-	wg.Wait()
+	go func() {
+		localWg.Wait()
+		close(isFound)
+	}()
+	if <-isFound {
+		outputChannel <- port
+	}
 }
 
 func (t *myTask) ID() int {
@@ -64,4 +85,8 @@ func (t *myTask) ID() int {
 
 func (t *myTask) OutputChannel() chan Output {
 	return t.outputChannel
+}
+
+func (t *myTask) WaitGroup() *sync.WaitGroup {
+	return t.wg
 }

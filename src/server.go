@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/gin-gonic/gin"
@@ -10,7 +11,6 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
-	"time"
 )
 
 type myServer struct {
@@ -50,15 +50,15 @@ func getConfigObj() (*config, error) { // todo: must be read from a yml file
 		portChunkSize: 32,
 		clusters: []cluster{
 			{mean: 1000, numWorker: 70, taskQueue: make(chan Task)},
-			{mean: 10000, numWorker: 20, taskQueue: make(chan Task)},
-			{mean: 40000, numWorker: 10, taskQueue: make(chan Task)},
+			{mean: 10000, numWorker: 30, taskQueue: make(chan Task)},
+			{mean: 40000, numWorker: 30, taskQueue: make(chan Task)},
 		},
 	}, nil
 }
 
-func (myServer *myServer) Launch() {
+func (myServer *myServer) Launch(ctx *context.Context) {
 	go myServer.launchHttp()
-	go myServer.launchApplication()
+	go myServer.launchApplication(ctx)
 }
 
 func (myServer *myServer) launchHttp() {
@@ -68,16 +68,18 @@ func (myServer *myServer) launchHttp() {
 	}
 }
 
-func (myServer *myServer) launchApplication() {
+func (myServer *myServer) launchApplication(ctx *context.Context) {
 	log.Printf("launching port scan application: %s\n", myServer.httpServer.Addr)
 	var wg sync.WaitGroup
 	var id uint = 1
 	for _, c := range myServer.config.clusters {
 		for i := 1; i <= int(c.numWorker); i++ {
-			go worker(id, c.taskQueue, &wg)
+			wg.Add(1)
+			go worker(id, c.taskQueue, &wg, ctx)
 			id += 1
 		}
 	}
+	<-(*ctx).Done()
 	wg.Wait()
 }
 
@@ -101,18 +103,21 @@ func (myServer *myServer) handleQuery(c *gin.Context) {
 	}
 	domain, fromPort, toPort := myServer.getParameters(c)
 	outputChannel := make(chan Output)
+	var wg sync.WaitGroup
 	for startPort := fromPort; startPort <= toPort; startPort += myServer.config.portChunkSize {
+		wg.Add(1)
 		newTask := NewTask(
 			domain,
 			startPort,
 			uint(math.Min(float64(startPort+myServer.config.portChunkSize), float64(toPort))),
 			outputChannel,
+			&wg,
 		)
 		c := myServer.findBestCluster(startPort)
 		c.taskQueue <- newTask
 	}
 	go func() {
-		<-time.After(2 * time.Second)
+		wg.Wait()
 		close(outputChannel)
 	}()
 	myServer.printOutputs(c, outputChannel)
